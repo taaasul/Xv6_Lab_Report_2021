@@ -16,99 +16,6 @@
 #include "file.h"
 #include "fcntl.h"
 
-// ÔÚÎÄ¼ş¿ªÍ·Ìí¼Óº¯ÊıÉùÃ÷
-static struct inode* create(char* path, short type, short major, short minor);
-struct inode* follow_symlink(struct inode* ip);
-
-uint64
-sys_symlink(void)
-{
-  char target[MAXPATH], path[MAXPATH];
-  struct inode* ip;
-
-  // »ñÈ¡ÏµÍ³µ÷ÓÃ²ÎÊı
-  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
-    return -1;
-
-  begin_op();
-
-  // ´´½¨·ûºÅÁ´½ÓÎÄ¼ş
-  if ((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
-    end_op();
-    return -1;
-  }
-
-  // ½«Ä¿±êÂ·¾¶Ğ´Èë·ûºÅÁ´½ÓÎÄ¼ş
-  if (writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)) {
-    iunlockput(ip);
-    end_op();
-    return -1;
-  }
-
-  iunlockput(ip);
-  end_op();
-  return 0;
-}
-
-struct inode*
-  follow_symlink(struct inode* ip)
-{
-  struct inode* next;
-  char target[MAXPATH];
-  uint inums[NSYMLINK];
-  int depth = 0;
-
-  // ³õÊ¼»¯ÒÑ·ÃÎÊµÄinode±àºÅÊı×é
-  for (int i = 0; i < NSYMLINK; i++)
-    inums[i] = 0;
-
-  while (ip->type == T_SYMLINK && depth < NSYMLINK) {
-    // ¼ì²éÊÇ·ñ³É»·
-    for (int i = 0; i < depth; i++) {
-      if (inums[i] == ip->inum) {
-        // ·¢ÏÖ»·£¬ÊÍ·Åµ±Ç°inode²¢·µ»Ø´íÎó
-        iunlockput(ip);
-        return 0;
-      }
-    }
-
-    // ¼ÇÂ¼µ±Ç°inode±àºÅ
-    inums[depth] = ip->inum;
-    depth++;
-
-    // ¶ÁÈ¡·ûºÅÁ´½ÓµÄÄ¿±êÂ·¾¶
-    if (readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0) {
-      iunlockput(ip);
-      return 0;
-    }
-
-    // È·±£Â·¾¶ÒÔnullÖÕÖ¹
-    target[MAXPATH - 1] = '\0';
-
-    // »ñÈ¡Ä¿±êÎÄ¼şµÄinode
-    if ((next = namei(target)) == 0) {
-      iunlockput(ip);
-      return 0;
-    }
-
-    // ÊÍ·Åµ±Ç°·ûºÅÁ´½ÓµÄinode
-    iunlockput(ip);
-
-    // Ëø¶¨Ä¿±êinode
-    ilock(next);
-    ip = next;
-  }
-
-  if (depth >= NSYMLINK) {
-    // ³¬¹ı×î´óµİ¹éÉî¶È
-    iunlockput(ip);
-    return 0;
-  }
-
-  return ip;
-}
-
-
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -376,72 +283,117 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+static struct inode* follow_symlink(struct inode* ip) {
+  uint inums[NSYMLINK];
+  int i, j;
+  char target[MAXPATH];
+
+  for(i = 0; i < NSYMLINK; ++i) {
+    inums[i] = ip->inum;
+    // read the target path from symlink file
+    if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0) {
+      iunlockput(ip);
+      printf("open_symlink: open symlink failed\n");
+      return 0;
+    }
+    iunlockput(ip);
+    
+    // get the inode of target path 
+    if((ip = namei(target)) == 0) {
+      printf("open_symlink: path \"%s\" is not exist\n", target);
+      return 0;
+    }
+    for(j = 0; j <= i; ++j) {
+      if(ip->inum == inums[j]) {
+        printf("open_symlink: links form a cycle\n");
+        return 0;
+      }
+    }
+    ilock(ip);
+    if(ip->type != T_SYMLINK) {
+      return ip;
+    }
+  }
+
+  iunlockput(ip);
+  printf("open_symlink: the depth of links reaches the limit\n");
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
   char path[MAXPATH];
   int fd, omode;
-  struct file* f;
-  struct inode* ip;
+  struct file *f;
+  struct inode *ip;
   int n;
-  if ((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
+
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
     return -1;
+
   begin_op();
-  if (omode & O_CREATE) {
+
+  if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
-    if (ip == 0) {
+    if(ip == 0){
       end_op();
       return -1;
     }
-  }
-  else {
-    if ((ip = namei(path)) == 0) {
+  } else {
+    if((ip = namei(path)) == 0){
       end_op();
       return -1;
     }
     ilock(ip);
-    if (ip->type == T_DIR && omode != O_RDONLY) {
+    if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
       return -1;
     }
   }
-  if (ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)) {
+
+  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
-  // ´¦Àí·ûºÅÁ´½Ó
-  if (ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {
-    if ((ip = follow_symlink(ip)) == 0) {
-      // follow_symlinkÊ§°ÜÊ±ÒÑ¾­ÊÍ·ÅÁËËø
+
+  // handle the symlink - lab9-2
+  if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {
+    if((ip = follow_symlink(ip)) == 0) {
+      // æ­¤å¤„ä¸ç”¨è°ƒç”¨iunlockput()é‡Šæ”¾é”,å› ä¸ºåœ¨follow_symlinktest()è¿”å›å¤±è´¥æ—¶ipçš„é”åœ¨å‡½æ•°å†…å·²ç»è¢«é‡Šæ”¾
       end_op();
       return -1;
     }
   }
-  if ((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0) {
-    if (f)
+
+  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+    if(f)
       fileclose(f);
     iunlockput(ip);
     end_op();
     return -1;
   }
-  if (ip->type == T_DEVICE) {
+
+  if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
-  }
-  else {
+  } else {
     f->type = FD_INODE;
     f->off = 0;
   }
   f->ip = ip;
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
-  if ((omode & O_TRUNC) && ip->type == T_FILE) {
+
+  if((omode & O_TRUNC) && ip->type == T_FILE){
     itrunc(ip);
   }
+
   iunlock(ip);
   end_op();
+
   return fd;
 }
 
@@ -576,5 +528,34 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+// lab9-2
+uint64 sys_symlink(void) {
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int n;
+
+  if ((n = argstr(0, target, MAXPATH)) < 0
+    || argstr(1, path, MAXPATH) < 0) {
+    return -1;
+  }
+
+  begin_op();
+  // create the symlink's inode
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
+    end_op();
+    return -1;
+  }
+  // write the target path to the inode
+  if(writei(ip, 0, (uint64)target, 0, n) != n) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }
