@@ -16,99 +16,6 @@
 #include "file.h"
 #include "fcntl.h"
 
-// 在文件开头添加函数声明
-static struct inode* create(char* path, short type, short major, short minor);
-struct inode* follow_symlink(struct inode* ip);
-
-uint64
-sys_symlink(void)
-{
-  char target[MAXPATH], path[MAXPATH];
-  struct inode* ip;
-
-  // 获取系统调用参数
-  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
-    return -1;
-
-  begin_op();
-
-  // 创建符号链接文件
-  if ((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
-    end_op();
-    return -1;
-  }
-
-  // 将目标路径写入符号链接文件
-  if (writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)) {
-    iunlockput(ip);
-    end_op();
-    return -1;
-  }
-
-  iunlockput(ip);
-  end_op();
-  return 0;
-}
-
-struct inode*
-  follow_symlink(struct inode* ip)
-{
-  struct inode* next;
-  char target[MAXPATH];
-  uint inums[NSYMLINK];
-  int depth = 0;
-
-  // 初始化已访问的inode编号数组
-  for (int i = 0; i < NSYMLINK; i++)
-    inums[i] = 0;
-
-  while (ip->type == T_SYMLINK && depth < NSYMLINK) {
-    // 检查是否成环
-    for (int i = 0; i < depth; i++) {
-      if (inums[i] == ip->inum) {
-        // 发现环，释放当前inode并返回错误
-        iunlockput(ip);
-        return 0;
-      }
-    }
-
-    // 记录当前inode编号
-    inums[depth] = ip->inum;
-    depth++;
-
-    // 读取符号链接的目标路径
-    if (readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0) {
-      iunlockput(ip);
-      return 0;
-    }
-
-    // 确保路径以null终止
-    target[MAXPATH - 1] = '\0';
-
-    // 获取目标文件的inode
-    if ((next = namei(target)) == 0) {
-      iunlockput(ip);
-      return 0;
-    }
-
-    // 释放当前符号链接的inode
-    iunlockput(ip);
-
-    // 锁定目标inode
-    ilock(next);
-    ip = next;
-  }
-
-  if (depth >= NSYMLINK) {
-    // 超过最大递归深度
-    iunlockput(ip);
-    return 0;
-  }
-
-  return ip;
-}
-
-
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -381,67 +288,66 @@ sys_open(void)
 {
   char path[MAXPATH];
   int fd, omode;
-  struct file* f;
-  struct inode* ip;
+  struct file *f;
+  struct inode *ip;
   int n;
-  if ((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
+
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
     return -1;
+
   begin_op();
-  if (omode & O_CREATE) {
+
+  if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
-    if (ip == 0) {
+    if(ip == 0){
       end_op();
       return -1;
     }
-  }
-  else {
-    if ((ip = namei(path)) == 0) {
+  } else {
+    if((ip = namei(path)) == 0){
       end_op();
       return -1;
     }
     ilock(ip);
-    if (ip->type == T_DIR && omode != O_RDONLY) {
+    if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
       return -1;
     }
   }
-  if (ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)) {
+
+  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
-  // 处理符号链接
-  if (ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {
-    if ((ip = follow_symlink(ip)) == 0) {
-      // follow_symlink失败时已经释放了锁
-      end_op();
-      return -1;
-    }
-  }
-  if ((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0) {
-    if (f)
+
+  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+    if(f)
       fileclose(f);
     iunlockput(ip);
     end_op();
     return -1;
   }
-  if (ip->type == T_DEVICE) {
+
+  if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
-  }
-  else {
+  } else {
     f->type = FD_INODE;
     f->off = 0;
   }
   f->ip = ip;
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
-  if ((omode & O_TRUNC) && ip->type == T_FILE) {
+
+  if((omode & O_TRUNC) && ip->type == T_FILE){
     itrunc(ip);
   }
+
   iunlock(ip);
   end_op();
+
   return fd;
 }
 
