@@ -105,13 +105,13 @@ uptime:
  li a7, SYS_uptime
  ecall
  ret
-.global ugetpid
-ugetpid:
- li a7, SYS_ugetpid
+.global trace
+trace:
+ li a7, SYS_trace
  ecall
  ret
-.global pgaccess
-pgaccess:
- li a7, SYS_pgaccess
+.global sysinfo
+sysinfo:
+ li a7, SYS_sysinfo
  ecall
  ret
