@@ -162,28 +162,30 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 // Remove npages of mappings starting from va. va must be
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.
-void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free) {
+void
+uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+{
   uint64 a;
-  pte_t* pte;
+  pte_t *pte;
 
-  if ((va % PGSIZE) != 0)
+  if((va % PGSIZE) != 0)
     panic("uvmunmap: not aligned");
 
-  for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
-    if ((pte = walk(pagetable, a, 0)) == 0)
+  for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
-    if ((*pte & PTE_V) == 0)
+    if((*pte & PTE_V) == 0)
       panic("uvmunmap: not mapped");
-    if (PTE_FLAGS(*pte) == PTE_V)
+    if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
-
-    if (do_free) {
+    if(do_free){
       uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);  // kfree内部会处理引用计数
+      kfree((void*)pa);
     }
     *pte = 0;
   }
 }
+
 // create an empty user page table.
 // returns 0 if out of memory.
 pagetable_t
@@ -298,114 +300,32 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
-  pte_t* pte;
+  pte_t *pte;
   uint64 pa, i;
   uint flags;
+  char *mem;
 
-  for (i = 0; i < sz; i += PGSIZE) {
-    if ((pte = walk(old, i, 0)) == 0)
+  for(i = 0; i < sz; i += PGSIZE){
+    if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
-    if ((*pte & PTE_V) == 0)
+    if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
-
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-
-    // 只对可写的用户页面启用COW
-    if ((flags & PTE_W) && (flags & PTE_U)) {
-      // COW处理：移除写权限，设置COW标志
-      flags &= ~PTE_W;      // 移除写权限
-      flags |= PTE_RSW;     // 设置COW标志
-
-      // 增加物理页面的引用计数
-      mem_count_up(pa);
-
-      // 更新父进程的页表项
-      *pte = PA2PTE(pa) | flags;
-
-      // 在子进程中映射同一个物理页面，使用相同的COW标志
-      if (mappages(new, i, PGSIZE, pa, flags) != 0) {
-        printf("uvmcopy: mappages failed for COW page at va=%p\n", i);
-        goto err;
-      }
-    }
-    else {
-      // 对于只读页面（如代码段），直接共享，不复制
-      if (mappages(new, i, PGSIZE, pa, flags) != 0) {
-        printf("uvmcopy: mappages failed for read-only page at va=%p\n", i);
-        goto err;
-      }
-      // 增加引用计数
-      mem_count_up(pa);
+    if((mem = kalloc()) == 0)
+      goto err;
+    memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
+      goto err;
     }
   }
   return 0;
 
-err:
-  printf("uvmcopy failed at i=%p\n", i);
+ err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
-
-pte_t*
-cow_walk(pagetable_t pagetable, uint64 va) {
-  pte_t *pte;
-  
-  if(va >= MAXVA)
-    return 0;
-    
-  pte = walk(pagetable, va, 0);
-  if(pte == 0)
-    return 0;
-  if((*pte & PTE_V) == 0)
-    return 0;
-  if((*pte & PTE_U) == 0)
-    return 0;
-  // 检查是否来自cow的页面错误
-  if((*pte & PTE_RSW) == 0)
-    return 0;
-
-  return pte;
-}
-
-int
-cow_handler(pagetable_t pagetable, uint64 va)
-{
-  va = PGROUNDDOWN(va);
-
-  pte_t* pte = walk(pagetable, va, 0);
-  if (pte == 0 || (*pte & PTE_V) == 0) {
-    return -1;
-  }
-
-  // 检查是否真的是COW页面
-  if (!(*pte & PTE_RSW)) {
-    return -1;
-  }
-
-  uint64 pa = PTE2PA(*pte);
-
-  // 分配新页面
-  char* mem = kalloc();
-  if (mem == 0) {
-    // 内存不足，这在某些测试中是预期的
-    printf("cow_handler: kalloc failed for va %p\n", va);
-    return -1;
-  }
-
-  // 复制内容
-  memmove(mem, (char*)pa, PGSIZE);
-
-  // 更新页表项：移除COW标志，恢复写权限
-  uint flags = (PTE_FLAGS(*pte) & ~PTE_RSW) | PTE_W;
-  *pte = PA2PTE((uint64)mem) | flags;
-
-  // 减少原页面引用计数
-  kfree((void*)pa);
-
-  return 0;
-}
-
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
@@ -424,37 +344,19 @@ uvmclear(pagetable_t pagetable, uint64 va)
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
 int
-copyout(pagetable_t pagetable, uint64 dstva, char* src, uint64 len)
+copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
 
-  while (len > 0) {
+  while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-
-    // 首先调用 walkaddr 检查地址是否有效
     pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) {
+    if(pa0 == 0)
       return -1;
-    }
-
-    // 只有在地址有效的情况下才检查是否是COW页面
-    pte_t* pte = walk(pagetable, va0, 0);
-    if (pte && (*pte & PTE_V) && (*pte & PTE_RSW)) {
-      // 是COW页面，处理COW
-      if (cow_handler(pagetable, va0) < 0) {
-        return -1;
-      }
-      // COW处理后重新获取物理地址
-      pa0 = walkaddr(pagetable, va0);
-      if (pa0 == 0) {
-        return -1;
-      }
-    }
-
     n = PGSIZE - (dstva - va0);
-    if (n > len)
+    if(n > len)
       n = len;
-    memmove((void*)(pa0 + (dstva - va0)), src, n);
+    memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
     src += n;
@@ -462,7 +364,6 @@ copyout(pagetable_t pagetable, uint64 dstva, char* src, uint64 len)
   }
   return 0;
 }
-
 
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.

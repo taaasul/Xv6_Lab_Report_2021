@@ -38,22 +38,22 @@ usertrap(void)
 {
   int which_dev = 0;
 
-  if ((r_sstatus() & SSTATUS_SPP) != 0)
+  if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
   // send interrupts and exceptions to kerneltrap(),
   // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
-  struct proc* p = myproc();
-
+  struct proc *p = myproc();
+  
   // save user program counter.
   p->trapframe->epc = r_sepc();
-
-  if (r_scause() == 8) {
+  
+  if(r_scause() == 8){
     // system call
 
-    if (p->killed)
+    if(p->killed)
       exit(-1);
 
     // sepc points to the ecall instruction,
@@ -65,57 +65,34 @@ usertrap(void)
     intr_on();
 
     syscall();
-  }
-  else if ((which_dev = devintr()) != 0) {
+  } else if((which_dev = devintr()) != 0){
     // ok
-  }
-  else if (r_scause() == 15) {  // Store page fault - COW����
-    uint64 fault_va = r_stval();
-
-    // ����ַ�Ƿ��ڽ��̵���Ч��Χ��
-    if (fault_va >= p->sz) {
-      // printf("usertrap: fault address %p beyond process size %p\n", fault_va, p->sz);
-      p->killed = 1;
-    }
-    else if (cow_handler(p->pagetable, fault_va) < 0) {
-      // printf("usertrap: COW handler failed for va %p\n", fault_va);
-      p->killed = 1;
-    }
-  }
-  else if (r_scause() == 12) {  // Instruction page fault
-    uint64 fault_va = r_stval();
-    pte_t* pte = walk(p->pagetable, fault_va, 0);
-    printf("Instruction page fault at %p\n", fault_va);
-    if (pte) {
-      printf("PTE: %p, flags: %p\n", *pte, PTE_FLAGS(*pte));
-      printf("PTE_V=%d, PTE_R=%d, PTE_W=%d, PTE_X=%d, PTE_U=%d, PTE_RSW=%d\n",
-        (*pte & PTE_V) ? 1 : 0,
-        (*pte & PTE_R) ? 1 : 0,
-        (*pte & PTE_W) ? 1 : 0,
-        (*pte & PTE_X) ? 1 : 0,
-        (*pte & PTE_U) ? 1 : 0,
-        (*pte & PTE_RSW) ? 1 : 0);
-    }
-    else {
-      printf("PTE not found for va %p\n", fault_va);
-    }
-    p->killed = 1;
-  }
-  else {
+  } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
 
-  if (p->killed)
+  if(p->killed)
     exit(-1);
 
+  if(which_dev == 2){   // timer interrupt
+    // increase the passed ticks
+    if(p->interval != 0 && ++p->passedticks == p->interval){  
+      // 使用 trapframe 后的一部分内存, trapframe大小为288B, 因此只要在trapframe地址后288以上地址都可, 此处512只是为了取整数幂
+      p->trapframecopy = p->trapframe + 512;  
+      memmove(p->trapframecopy,p->trapframe,sizeof(struct trapframe));    // copy trapframe
+      p->trapframe->epc = p->handler;   // execute handler() when return to user space
+    }
+  }
+
   // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2)
+  if(which_dev == 2)
     yield();
 
   usertrapret();
 }
+
 //
 // return to user space
 //

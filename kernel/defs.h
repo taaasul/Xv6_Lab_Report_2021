@@ -63,7 +63,6 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
-void*           mem_cow_alloc(uint64 va, pagetable_t pagetable);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -81,6 +80,7 @@ int             pipewrite(struct pipe*, uint64, int);
 void            printf(char*, ...);
 void            panic(char*) __attribute__((noreturn));
 void            printfinit(void);
+void            backtrace();
 
 // proc.c
 int             cpuid(void);
@@ -171,7 +171,6 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-pte_t*          walk(pagetable_t, uint64, int);      // 添加这一行
 
 // plic.c
 void            plicinit(void);
@@ -184,11 +183,5 @@ void            virtio_disk_init(void);
 void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
 
-int             get_mem_count(uint64 pa);
-void            mem_count_up(uint64 pa);
-int             mem_count_down(uint64 pa);
-void            mem_count_set_one(uint64 pa);
-pte_t*          cow_walk(pagetable_t , uint64 );
-int             cow_handler(pagetable_t, uint64);
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
