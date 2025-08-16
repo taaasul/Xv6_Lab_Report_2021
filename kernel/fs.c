@@ -61,22 +61,23 @@ bzero(int dev, int bno)
 // Blocks.
 
 // Allocate a zeroed disk block.
+// 在 balloc() 函数中，可以考虑延迟零化或批量操作
 static uint
 balloc(uint dev)
 {
   int b, bi, m;
-  struct buf *bp;
+  struct buf* bp;
 
   bp = 0;
-  for(b = 0; b < sb.size; b += BPB){
+  for (b = 0; b < sb.size; b += BPB) {
     bp = bread(dev, BBLOCK(b, sb));
-    for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
+    for (bi = 0; bi < BPB && b + bi < sb.size; bi++) {
       m = 1 << (bi % 8);
-      if((bp->data[bi/8] & m) == 0){  // Is block free?
-        bp->data[bi/8] |= m;  // Mark block in use.
+      if ((bp->data[bi / 8] & m) == 0) {  // Is block free?
+        bp->data[bi / 8] |= m;  // Mark block in use.
         log_write(bp);
         brelse(bp);
-        bzero(dev, b + bi);
+        bzero(dev, b + bi);  // 这里很慢
         return b + bi;
       }
     }
@@ -84,7 +85,6 @@ balloc(uint dev)
   }
   panic("balloc: out of blocks");
 }
-
 // Free a disk block.
 static void
 bfree(int dev, uint b)
@@ -375,53 +375,60 @@ iunlockput(struct inode *ip)
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
 static uint
-bmap(struct inode *ip, uint bn)
+bmap(struct inode* ip, uint bn)
 {
-  uint addr, *a;
-  struct buf *bp;
+  uint addr, * a;
+  struct buf* bp;
 
-  if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0)
+  if (bn < NDIRECT) {
+    if ((addr = ip->addrs[bn]) == 0)
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0)
+  if (bn < NINDIRECT) {
+    // 一级间接块
+    if ((addr = ip->addrs[NDIRECT]) == 0)
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
+    if ((addr = a[bn]) == 0) {
       a[bn] = addr = balloc(ip->dev);
       log_write(bp);
     }
     brelse(bp);
     return addr;
   }
-
-  // doubly-indirect block - lab9-1
   bn -= NINDIRECT;
-  if(bn < NDOUBLYINDIRECT) {
-    // get the address of doubly-indirect block
-    if((addr = ip->addrs[NDIRECT + 1]) == 0) {
+
+  // 二级间接块处理
+  if (bn < NDOUBLYINDIRECT) {
+    // 获取二级间接块
+    if ((addr = ip->addrs[NDIRECT + 1]) == 0)
       ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
-    }
+
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
-    // get the address of singly-indirect block
-    if((addr = a[bn / NINDIRECT]) == 0) {
-      a[bn / NINDIRECT] = addr = balloc(ip->dev);
+    uint first_level_index = bn / NINDIRECT;
+    int need_write_first = 0;
+
+    if ((addr = a[first_level_index]) == 0) {
+      a[first_level_index] = addr = balloc(ip->dev);
+      need_write_first = 1;
+    }
+
+    if (need_write_first) {
       log_write(bp);
     }
     brelse(bp);
+
+    // 获取一级间接块
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
-    bn %= NINDIRECT;
-    // get the address of direct block
-    if((addr = a[bn]) == 0) {
-      a[bn] = addr = balloc(ip->dev);
+    uint second_level_index = bn % NINDIRECT;
+    if ((addr = a[second_level_index]) == 0) {
+      a[second_level_index] = addr = balloc(ip->dev);
       log_write(bp);
     }
     brelse(bp);
@@ -434,46 +441,47 @@ bmap(struct inode *ip, uint bn)
 // Truncate inode (discard contents).
 // Caller must hold ip->lock.
 void
-itrunc(struct inode *ip)
+itrunc(struct inode* ip)
 {
-  int i, j, k;  // lab9-1
-  struct buf *bp, *bp2;     // lab9-1
-  uint *a, *a2; // lab9-1
+  int i, j, k;
+  struct buf* bp, * bp2;
+  uint* a, * a2;
 
-  for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
+  // 释放直接块
+  for (i = 0; i < NDIRECT; i++) {
+    if (ip->addrs[i]) {
       bfree(ip->dev, ip->addrs[i]);
       ip->addrs[i] = 0;
     }
   }
 
-  if(ip->addrs[NDIRECT]){
+  // 释放一级间接块
+  if (ip->addrs[NDIRECT]) {
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
+    for (j = 0; j < NINDIRECT; j++) {
+      if (a[j])
         bfree(ip->dev, a[j]);
     }
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
-  // free the doubly-indirect block - lab9-1
-  if(ip->addrs[NDIRECT + 1]) {
+
+  // 释放二级间接块
+  if (ip->addrs[NDIRECT + 1]) {
     bp = bread(ip->dev, ip->addrs[NDIRECT + 1]);
     a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; ++j) {
-      if(a[j]) {
+    for (j = 0; j < NINDIRECT; j++) {
+      if (a[j]) {
         bp2 = bread(ip->dev, a[j]);
         a2 = (uint*)bp2->data;
-        for(k = 0; k < NINDIRECT; ++k) {
-          if(a2[k]) {
+        for (k = 0; k < NINDIRECT; k++) {
+          if (a2[k])
             bfree(ip->dev, a2[k]);
-          }
         }
         brelse(bp2);
         bfree(ip->dev, a[j]);
-        a[j] = 0;
       }
     }
     brelse(bp);
@@ -484,7 +492,6 @@ itrunc(struct inode *ip)
   ip->size = 0;
   iupdate(ip);
 }
-
 // Copy stat information from inode.
 // Caller must hold ip->lock.
 void
